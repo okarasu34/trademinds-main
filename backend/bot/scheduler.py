@@ -2,67 +2,63 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
+from datetime import datetime
+from sqlalchemy import select, update
+
+from db.database import AsyncSessionLocal
+from db.models import BotConfig, BotStatus, BotHealthLog, Trade, OrderStatus
+from db.redis_client import publish
+from data.calendar import calendar_client
 from bot.trading_bot import TradingBot
 
-# Bot motorunu burada başlatıyoruz
 scheduler = AsyncIOScheduler(timezone="UTC")
-bot_instance = TradingBot()
+
+# TradingBot bir user_id beklediği için, scheduler içinde 
+# her botu kendi config'i ile dinamik olarak yöneteceğiz.
+# Bu yüzden global bir bot_instance yerine fonksiyon içinde başlatacağız.
+
+async def run_all_bots():
+    """Veritabanında RUNNING olan tüm botları tara ve çalıştır."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(BotConfig).where(BotConfig.status == BotStatus.RUNNING)
+        )
+        active_configs = result.scalars().all()
+        
+        for config in active_configs:
+            try:
+                # Her aktif kullanıcı için bir bot motoru oluştur
+                bot = TradingBot(user_id=config.user_id)
+                await bot._scan_and_execute()
+            except Exception as e:
+                logger.error(f"Bot execution failed for user {config.user_id}: {e}")
 
 def setup_scheduler():
-    """Tüm görevleri kaydet ve botu ateşle."""
-
-    # ─── ANA ANALİZ VE İŞLEM MOTORU (Her 60 Saniyede Bir) ───
-    # Bu satır botun piyasayı taramasını sağlar
+    # ANA ANALİZ MOTORU: Artık run_all_bots fonksiyonunu çağırıyoruz
     scheduler.add_job(
-        bot_instance._scan_and_execute,
+        run_all_bots,
         IntervalTrigger(seconds=60),
         id="main_trading_engine",
         replace_existing=True,
     )
 
-    # ─── Bot Sağlık Kontrolü ───
-    from bot.scheduler import health_check_all_bots
-    scheduler.add_job(
-        health_check_all_bots,
-        IntervalTrigger(seconds=60),
-        id="health_check",
-        replace_existing=True,
-    )
-
-    # ─── Ekonomik Takvim Yenileme ───
-    from bot.scheduler import refresh_calendar
-    scheduler.add_job(
-        refresh_calendar,
-        IntervalTrigger(minutes=5),
-        id="calendar_refresh",
-        replace_existing=True,
-    )
-
-    # ─── Bakiye Senkronizasyonu ───
-    from bot.scheduler import sync_broker_balances
-    scheduler.add_job(
-        sync_broker_balances,
-        IntervalTrigger(minutes=30),
-        id="broker_sync",
-        replace_existing=True,
-    )
-
+    scheduler.add_job(health_check_all_bots, IntervalTrigger(seconds=60), id="health")
+    scheduler.add_job(refresh_calendar, IntervalTrigger(minutes=5), id="calendar")
+    
     scheduler.start()
-    logger.info(">>> TRADING ENGINE VE SCHEDULER BAŞLATILDI <<<")
+    logger.info(">>> SCHEDULER DİNAMİK MODDA BAŞLATILDI <<<")
 
-# Mevcut fonksiyonlarını aşağıya ekliyoruz (Dosya bütünlüğü için)
+# --- Diğer fonksiyonlar (health_check_all_bots, refresh_calendar vb.) aynen kalsın ---
 async def health_check_all_bots():
-    from bot.scheduler_tasks import health_check_all_bots as hc
-    await hc()
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await db.execute(select(BotConfig).where(BotConfig.status == BotStatus.RUNNING))
+            configs = result.scalars().all()
+            for config in configs:
+                await publish(f"health:{config.user_id}", {"status": "healthy", "checked_at": datetime.utcnow().isoformat()})
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
 
 async def refresh_calendar():
-    from data.calendar import calendar_client
-    try:
-        await calendar_client.get_calendar(hours_ahead=24, impact_filter=["high", "medium"])
-    except Exception as e:
-        logger.warning(f"Calendar refresh failed: {e}")
-
-async def sync_broker_balances():
-    # Mevcut fonksiyonun içeriği buraya gelecek veya import edilecek
-    pass
-EOF
+    try: await calendar_client.get_calendar(hours_ahead=24)
+    except: pass

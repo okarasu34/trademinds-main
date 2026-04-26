@@ -38,31 +38,7 @@ BUILTIN_STRATEGIES = [
         },
         "is_builtin": True, "priority": 90,
     },
-    {
-        "name": "Mean Reversion Elite",
-        "description": "Bollinger Bands %B + Stochastic RSI mean reversion.",
-        "strategy_type": StrategyType.MEAN_REVERSION,
-        "markets": ["commodity", "forex", "crypto"],
-        "parameters": {
-            "bb_period": 20, "bb_std": 2.5,
-            "bb_position_buy": 0.10, "bb_position_sell": 0.90,
-            "stoch_oversold": 20, "stoch_overbought": 80,
-            "min_confidence": 0.70, "max_holding_hours": 72,
-        },
-        "is_builtin": True, "priority": 80,
-    },
-    {
-        "name": "Breakout Scalper",
-        "description": "Session-based breakout with ATR stops.",
-        "strategy_type": StrategyType.BREAKOUT,
-        "markets": ["forex", "crypto"],
-        "parameters": {
-            "lookback_hours": 4, "breakout_threshold": 0.5,
-            "atr_period": 14, "min_confidence": 0.68,
-            "holding_max_minutes": 120,
-        },
-        "is_builtin": True, "priority": 60,
-    },
+
 ]
 
 

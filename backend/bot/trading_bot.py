@@ -26,19 +26,19 @@ from notifications.notifier import Notifier
 
 class TradingBot:
     def __init__(self, user_id: str):
-        self.user_id = user_id
-        self.is_running = False
+        self.user_id     = user_id
+        self.is_running  = False
         self.adapters: dict[str, BrokerAdapter] = {}
-        self.notifier = Notifier(user_id)
+        self.notifier    = Notifier(user_id)
         self._loop_task: Optional[asyncio.Task] = None
         self.config: Optional[BotConfig] = None
 
-    # ── Lifecycle ──
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self, config: BotConfig):
         if self.is_running:
             return
-        self.config = config
+        self.config     = config
         self.is_running = True
         logger.info(f"Bot starting | user={self.user_id} | mode={config.trade_mode.value}")
 
@@ -47,7 +47,10 @@ class TradingBot:
             await _rc_module.init_redis()
 
         await self._connect_brokers()
-        await set_bot_state(self.user_id, {"status": "running", "started_at": datetime.utcnow().isoformat()})
+        await set_bot_state(self.user_id, {
+            "status":     "running",
+            "started_at": datetime.utcnow().isoformat(),
+        })
         self._loop_task = asyncio.create_task(self._main_loop())
         logger.info(f"Bot loop started | user={self.user_id}")
 
@@ -64,8 +67,9 @@ class TradingBot:
         if self._loop_task:
             self._loop_task.cancel()
         await set_bot_state(self.user_id, {"status": "paused"})
+        logger.info(f"Bot paused | user={self.user_id}")
 
-    # ── Main Loop ──
+    # ── Main Loop ─────────────────────────────────────────────────────────────
 
     async def _main_loop(self):
         logger.info(f"Main loop running | user={self.user_id}")
@@ -81,30 +85,31 @@ class TradingBot:
                 logger.error(f"Bot loop error | user={self.user_id}: {e}", exc_info=True)
                 await asyncio.sleep(30)
 
-    # ── Health Check ──
+    # ── Health Check ─────────────────────────────────────────────────────────
 
     async def _health_check(self):
         try:
             async with AsyncSessionLocal() as db:
                 open_trades = await self._get_open_positions(db)
-                daily_pnl = -(self.config.daily_loss or 0.0)
+                daily_pnl   = -(self.config.daily_loss or 0.0)
 
             await publish(f"health:{self.user_id}", {
-                "status": "healthy",
-                "open_positions": len(open_trades),
-                "daily_pnl": daily_pnl,
-                "checked_at": datetime.utcnow().isoformat(),
+                "status":          "healthy",
+                "open_positions":  len(open_trades),
+                "daily_pnl":       daily_pnl,
+                "checked_at":      datetime.utcnow().isoformat(),
             })
-            logger.info(f"Health check OK | open={len(open_trades)} pnl={daily_pnl}")
+            logger.info(f"Health OK | open={len(open_trades)} pnl={daily_pnl:.2f}")
         except Exception as e:
-            logger.error(f"Health check error | {e}")
+            logger.error(f"Health check error: {e}")
 
-    # ── Scan & Execute ──
+    # ── Scan & Execute ────────────────────────────────────────────────────────
 
     async def _scan_and_execute(self):
         try:
             async with AsyncSessionLocal() as db:
                 strategies = await self._get_active_strategies(db)
+
             if not strategies:
                 logger.info("No active strategies found")
                 return
@@ -114,23 +119,34 @@ class TradingBot:
 
             if risk_manager.should_emergency_stop(account_info["balance"]):
                 logger.warning(f"Emergency stop | user={self.user_id}")
+                await self.notifier.send("🛑 Daily loss limit reached. Bot paused.", level="critical")
+                async with AsyncSessionLocal() as db2:
+                    await db2.execute(
+                        update(BotConfig)
+                        .where(BotConfig.user_id == self.user_id)
+                        .values(status=BotStatus.PAUSED)
+                    )
+                    await db2.commit()
                 await self.pause()
                 return
 
-            upcoming_news = await calendar_client.get_upcoming_high_impact(minutes_ahead=self.config.news_pause_minutes)
+            upcoming_news = await calendar_client.get_upcoming_high_impact(
+                minutes_ahead=self.config.news_pause_minutes
+            )
 
+            # Build open_symbols set — updated as positions are opened
             open_symbols: set[str] = set()
             async with AsyncSessionLocal() as pos_db:
-                existing = await self._get_open_positions(pos_db)
+                existing     = await self._get_open_positions(pos_db)
                 open_symbols = {t.symbol.upper() for t in existing}
 
-            logger.info(f"Scan start | open_symbols={open_symbols}")
+            logger.info(f"Scan start | open={open_symbols}")
 
             for strategy in strategies:
                 for market_type in (strategy.markets or []):
                     for symbol in self._get_symbols(strategy, market_type):
                         if symbol.upper() in open_symbols:
-                            logger.info(f"Duplicate skip | {symbol} already open")
+                            logger.info(f"Duplicate skip | {symbol}")
                             continue
                         try:
                             async with AsyncSessionLocal() as sym_db:
@@ -146,40 +162,45 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Scan error: {e}", exc_info=True)
 
-    # ── Market Type Detection ──
+    # ── Market Type Detection ─────────────────────────────────────────────────
 
     def _detect_market_type(self, symbol: str, fallback: str) -> str:
-        sym = symbol.upper().replace("/", "").replace("-", "")
-        crypto = ['BTC','ETH','SOL','XRP','LTC','ADA','DOGE','AVAX','PEPE','SHIB','TRX','AAVE','HBAR','XLM','USDT','ALGO']
-        commodity = ['GOLD','SILVER','OIL','BRENT','NATGAS','CORN','WHEAT','SUGAR','COFFEE','COPPER','COCOA','PLATINUM','PALLADIUM','XAU','XAG']
-        index = ['US500','US30','US100','NAS','DE40','UK100','JP225','AU200','FR40','HK50','SPX','DOW']
-        forex_ccy = ['USD','EUR','GBP','JPY','CHF','CAD','AUD','NZD']
+        sym       = symbol.upper().replace("/", "").replace("-", "")
+        crypto    = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","AVAX","PEPE","SHIB","TRX","AAVE","HBAR","XLM","USDT","ALGO"]
+        commodity = ["GOLD","SILVER","OIL","BRENT","NATGAS","CORN","WHEAT","SUGAR","COFFEE","COPPER","COCOA","PLATINUM","PALLADIUM","XAU","XAG"]
+        index     = ["US500","US30","US100","NAS","DE40","UK100","JP225","AU200","FR40","HK50","SPX","DOW"]
+        forex_ccy = ["USD","EUR","GBP","JPY","CHF","CAD","AUD","NZD"]
 
         for k in crypto:
             if k in sym:
-                return 'crypto'
+                return "crypto"
         for k in commodity:
             if k in sym:
-                return 'commodity'
+                return "commodity"
         for k in index:
             if k in sym:
-                return 'index'
+                return "index"
         if any(sym.startswith(k) or sym.endswith(k) for k in forex_ccy) and len(sym) <= 7:
-            return 'forex'
+            return "forex"
         if sym.isalpha() and len(sym) <= 5:
-            return 'stock'
+            return "stock"
         return fallback
 
-    async def _analyze_and_trade(self, db, symbol, market_type, strategy, open_symbols: set, account_info, upcoming_news, risk_manager) -> bool:
+    # ── Analyze & Trade ───────────────────────────────────────────────────────
+
+    async def _analyze_and_trade(
+        self, db, symbol, market_type, strategy,
+        open_symbols: set, account_info, upcoming_news, risk_manager
+    ) -> bool:
         market_type = self._detect_market_type(symbol, market_type)
 
         adapter = self.adapters.get(market_type) or next(iter(self.adapters.values()), None)
         if not adapter:
-            logger.warning(f"No adapter available for {symbol}")
+            logger.warning(f"No adapter for {symbol}")
             return False
 
         try:
-            tick = await adapter.get_tick(symbol)
+            tick  = await adapter.get_tick(symbol)
             await set_live_price(symbol, tick.price, tick.bid, tick.ask)
             df_1h = await adapter.get_candles(symbol, "1h", 500)
             df_4h = await adapter.get_candles(symbol, "4h", 100)
@@ -188,19 +209,21 @@ class TradingBot:
             return False
 
         indicators = calculate_indicators(df_1h)
+        if not indicators:
+            return False
+
         patterns = detect_patterns(df_1h)
         if patterns:
             indicators["patterns"] = patterns
 
-        htf_indicators = calculate_indicators(df_4h) if df_4h is not None and len(df_4h) >= 50 else {}
-        htf_trend = get_mtf_trend(htf_indicators)
-        indicators["htf_trend_4h"] = htf_trend
-        indicators["htf_adx_4h"] = htf_indicators.get("adx")
-        indicators["htf_ema50_4h"] = htf_indicators.get("ema_50")
+        htf_indicators              = calculate_indicators(df_4h) if df_4h is not None and len(df_4h) >= 50 else {}
+        indicators["htf_trend_4h"]  = get_mtf_trend(htf_indicators)
+        indicators["htf_adx_4h"]    = htf_indicators.get("adx")
+        indicators["htf_ema50_4h"]  = htf_indicators.get("ema_50")
         indicators["htf_ema200_4h"] = htf_indicators.get("ema_200")
 
         strategy_type = strategy.strategy_type.value if hasattr(strategy.strategy_type, "value") else str(strategy.strategy_type)
-        indicators = apply_strategy_filters(indicators, strategy_type, strategy.parameters or {})
+        indicators    = apply_strategy_filters(indicators, strategy_type, strategy.parameters or {})
 
         import numpy as np
         indicators = {
@@ -210,9 +233,10 @@ class TradingBot:
         }
 
         symbol_events = await calendar_client.get_events_for_symbol(symbol, hours_ahead=4)
-        news_items = [f"{e['title']} ({e['currency']}, {e['impact']}, in {e['minutes_until']:.0f}min)" for e in symbol_events]
-
-        daily_pnl = -(self.config.daily_loss or 0.0)
+        news_items    = [
+            f"{e['title']} ({e['currency']}, {e['impact']}, in {e['minutes_until']:.0f}min)"
+            for e in symbol_events
+        ]
 
         signal = await analyze_market(
             symbol=symbol, market_type=market_type,
@@ -220,7 +244,8 @@ class TradingBot:
             indicators=indicators, recent_news=news_items, economic_events=upcoming_news,
             current_price=tick.price, bid=tick.bid, ask=tick.ask, spread=tick.spread,
             open_positions=len(open_symbols), max_positions=self.config.max_positions,
-            account_balance=account_info["balance"], daily_pnl=daily_pnl,
+            account_balance=account_info["balance"],
+            daily_pnl=-(self.config.daily_loss or 0.0),
             max_daily_loss_pct=self.config.max_daily_loss_pct,
             max_risk_pct=self.config.max_risk_per_trade_pct,
             ai_system_prompt_override=strategy.ai_system_prompt,
@@ -232,20 +257,25 @@ class TradingBot:
             return False
 
         entry_price = tick.ask if signal["signal"] == "buy" else tick.bid
-        atr = indicators.get("atr_14", entry_price * 0.01)
+        atr         = indicators.get("atr_14", entry_price * 0.01) or entry_price * 0.01
 
         raw_sl = signal.get("stop_loss", 0)
         raw_tp = signal.get("take_profit", 0)
+
         stop_loss, take_profit = validate_sl_tp(
             signal=signal["signal"],
             entry_price=entry_price,
-            stop_loss=raw_sl if raw_sl else (entry_price - atr * 1.5 if signal["signal"] == "buy" else entry_price + atr * 1.5),
-            take_profit=raw_tp if raw_tp else (entry_price + atr * 3.0 if signal["signal"] == "buy" else entry_price - atr * 3.0),
+            stop_loss=raw_sl if raw_sl else (
+                entry_price - atr * 1.5 if signal["signal"] == "buy" else entry_price + atr * 1.5
+            ),
+            take_profit=raw_tp if raw_tp else (
+                entry_price + atr * 3.0 if signal["signal"] == "buy" else entry_price - atr * 3.0
+            ),
             atr=atr,
         )
 
         lot_size = calculate_lot_size_from_risk(
-            account_balance=account_info["balance"],
+            account_balance=max(account_info["balance"], 1000),  # Use 1000 as floor for paper
             risk_pct=self.config.max_risk_per_trade_pct,
             entry_price=entry_price,
             stop_loss=stop_loss,
@@ -254,10 +284,10 @@ class TradingBot:
 
         risk_result = await risk_manager.check_new_trade(
             user_id=self.user_id, market_type=market_type, symbol=symbol,
-            lot_size=lot_size, entry_price=entry_price,
-            stop_loss=stop_loss,
-            account_balance=account_info["balance"],
-            open_positions=list(open_symbols), upcoming_news=upcoming_news,
+            lot_size=lot_size, entry_price=entry_price, stop_loss=stop_loss,
+            account_balance=max(account_info["balance"], 1000),
+            open_positions=list(open_symbols),
+            upcoming_news=upcoming_news,
         )
 
         if not risk_result.allowed:
@@ -269,43 +299,53 @@ class TradingBot:
 
         broker_account = await self._get_broker_for_market(db, market_type)
         if not broker_account:
-            logger.warning(f"No broker account found for {symbol}")
+            logger.warning(f"No broker account for {symbol}")
             return False
 
         if self.config.trade_mode == TradeMode.LIVE:
             order_id = await adapter.place_order(
-                symbol=symbol, side=signal["signal"], lot_size=lot_size,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
+                symbol=symbol, side=signal["signal"],
+                lot_size=lot_size, stop_loss=stop_loss, take_profit=take_profit,
             )
         else:
             order_id = f"PAPER_{symbol}_{datetime.utcnow().strftime('%H%M%S')}"
 
         if order_id:
-            signal["stop_loss"] = stop_loss
+            signal["stop_loss"]   = stop_loss
             signal["take_profit"] = take_profit
-            trade = await self._save_trade(db, broker_account.id, strategy.id, symbol, market_type, signal, entry_price, lot_size, order_id)
+            trade = await self._save_trade(
+                db, broker_account.id, strategy.id, symbol,
+                market_type, signal, entry_price, lot_size, order_id
+            )
             await self.notifier.send_trade_opened(trade, signal)
-            await publish(f"trades:{self.user_id}", {"event": "trade_opened", "symbol": symbol, "side": signal["signal"], "price": entry_price})
-            logger.info(f"Trade opened | {symbol} {signal['signal']} | order_id={order_id}")
+            await publish(f"trades:{self.user_id}", {
+                "event":  "trade_opened",
+                "symbol": symbol,
+                "side":   signal["signal"],
+                "price":  entry_price,
+            })
+            logger.info(f"Trade opened | {symbol} {signal['signal']} | {order_id}")
             return True
 
         return False
 
-    # ── Position Sync ──
+    # ── Position Sync ─────────────────────────────────────────────────────────
 
     async def _sync_open_positions(self):
         try:
             async with AsyncSessionLocal() as db:
                 open_trades = await self._get_open_positions(db)
                 for trade in open_trades:
-                    adapter = self.adapters.get(trade.market_type.value) or next(iter(self.adapters.values()), None)
+                    adapter = self.adapters.get(
+                        trade.market_type.value if hasattr(trade.market_type, "value") else str(trade.market_type)
+                    ) or next(iter(self.adapters.values()), None)
+
                     if not adapter:
                         continue
                     try:
                         broker_positions = await adapter.get_open_orders()
-                        broker_ids = {p.order_id for p in broker_positions}
-                        broker_pos = next((p for p in broker_positions if p.order_id == trade.broker_order_id), None)
+                        broker_ids       = {p.order_id for p in broker_positions}
+                        broker_pos       = next((p for p in broker_positions if p.order_id == trade.broker_order_id), None)
 
                         if trade.broker_order_id not in broker_ids:
                             pnl = broker_pos.pnl if broker_pos else 0
@@ -318,22 +358,30 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Sync positions error: {e}")
 
-    # ── DB Operations ──
+    # ── DB Operations ─────────────────────────────────────────────────────────
 
     async def _get_active_strategies(self, db: AsyncSession) -> list:
-        r = await db.execute(select(Strategy).where(Strategy.user_id == self.user_id, Strategy.is_active == True).order_by(Strategy.priority.desc()))
+        r = await db.execute(
+            select(Strategy)
+            .where(Strategy.user_id == self.user_id, Strategy.is_active == True)
+            .order_by(Strategy.priority.desc())
+        )
         return r.scalars().all()
 
     async def _get_open_positions(self, db: AsyncSession) -> list:
-        r = await db.execute(select(Trade).where(Trade.user_id == self.user_id, Trade.status == OrderStatus.OPEN))
+        r = await db.execute(
+            select(Trade).where(Trade.user_id == self.user_id, Trade.status == OrderStatus.OPEN)
+        )
         return r.scalars().all()
 
     async def _get_broker_for_market(self, db: AsyncSession, market_type: str):
-        r = await db.execute(select(BrokerAccount).where(
-            BrokerAccount.user_id == self.user_id,
-            BrokerAccount.is_active == True,
-            BrokerAccount.is_connected == True,
-        ).limit(1))
+        r = await db.execute(
+            select(BrokerAccount).where(
+                BrokerAccount.user_id    == self.user_id,
+                BrokerAccount.is_active  == True,
+                BrokerAccount.is_connected == True,
+            ).limit(1)
+        )
         return r.scalar_one_or_none()
 
     async def _save_trade(self, db, broker_id, strategy_id, symbol, market_type, signal, entry_price, lot_size, order_id) -> Trade:
@@ -350,22 +398,37 @@ class TradingBot:
             opened_at=datetime.utcnow(),
         )
         db.add(trade)
-        await db.execute(update(Strategy).where(Strategy.id == strategy_id).values(total_trades=Strategy.total_trades + 1))
-        await db.execute(update(BotConfig).where(BotConfig.user_id == self.user_id).values(daily_trades=BotConfig.daily_trades + 1))
+        await db.execute(
+            update(Strategy).where(Strategy.id == strategy_id)
+            .values(total_trades=Strategy.total_trades + 1)
+        )
+        await db.execute(
+            update(BotConfig).where(BotConfig.user_id == self.user_id)
+            .values(daily_trades=BotConfig.daily_trades + 1)
+        )
         await db.commit()
         await db.refresh(trade)
         return trade
 
     async def _close_trade(self, db, trade, pnl, closed_by):
-        trade.status = OrderStatus.CLOSED
-        trade.pnl = round(pnl, 2)
+        trade.status    = OrderStatus.CLOSED
+        trade.pnl       = round(pnl, 2)
         trade.closed_at = datetime.utcnow()
         trade.closed_by = closed_by
         if pnl < 0:
-            await db.execute(update(BotConfig).where(BotConfig.user_id == self.user_id).values(daily_loss=BotConfig.daily_loss + abs(pnl)))
+            await db.execute(
+                update(BotConfig).where(BotConfig.user_id == self.user_id)
+                .values(daily_loss=BotConfig.daily_loss + abs(pnl))
+            )
         await db.commit()
         await self.notifier.send_trade_closed(trade)
-        await publish(f"trades:{self.user_id}", {"event": "trade_closed", "trade_id": trade.id, "symbol": trade.symbol, "pnl": pnl, "closed_by": closed_by})
+        await publish(f"trades:{self.user_id}", {
+            "event":      "trade_closed",
+            "trade_id":   trade.id,
+            "symbol":     trade.symbol,
+            "pnl":        pnl,
+            "closed_by":  closed_by,
+        })
 
     async def _log_signal(self, db, symbol, market_type, signal):
         try:
@@ -380,21 +443,32 @@ class TradingBot:
             await db.commit()
         except Exception as e:
             logger.warning(f"Signal log error {symbol}: {e}")
-        await publish(f"signals:{self.user_id}", {"symbol": symbol, "signal": signal["signal"], "confidence": signal.get("confidence", 0)})
+        await publish(f"signals:{self.user_id}", {
+            "symbol":     symbol,
+            "signal":     signal["signal"],
+            "confidence": signal.get("confidence", 0),
+        })
 
     async def _connect_brokers(self):
         async with AsyncSessionLocal() as db:
-            r = await db.execute(select(BrokerAccount).where(BrokerAccount.user_id == self.user_id, BrokerAccount.is_active == True))
+            r        = await db.execute(
+                select(BrokerAccount).where(
+                    BrokerAccount.user_id   == self.user_id,
+                    BrokerAccount.is_active == True,
+                )
+            )
             accounts = r.scalars().all()
+
         for account in accounts:
             try:
                 adapter = get_broker_adapter(account)
                 if await adapter.connect():
+                    # Register adapter for all market types (Capital.com handles all)
                     for mt in ["forex", "crypto", "commodity", "index", "stock"]:
                         if mt not in self.adapters:
                             self.adapters[mt] = adapter
                     self.adapters[account.market_type.value] = adapter
-                    logger.info(f"Connected: {account.broker_type} ({account.market_type.value}) — registered for all market types")
+                    logger.info(f"Connected: {account.broker_type} ({account.market_type.value})")
             except Exception as e:
                 logger.error(f"Broker error {account.broker_type}: {e}")
 
@@ -418,19 +492,19 @@ class TradingBot:
                 continue
             seen.add(id(adapter))
             try:
-                info = await adapter.get_account_info()
+                info    = await adapter.get_account_info()
                 balance += info.balance
-                equity += info.equity
+                equity  += info.equity
             except Exception:
                 pass
         return {"balance": balance, "equity": equity}
 
-    def _get_symbols(self, strategy, market_type):
+    def _get_symbols(self, strategy, market_type) -> list:
         if strategy.symbols:
             return strategy.symbols
 
         adapter = self.adapters.get(market_type)
-        if adapter and hasattr(adapter, 'get_cached_watchlist_symbols'):
+        if adapter and hasattr(adapter, "get_cached_watchlist_symbols"):
             try:
                 symbols = adapter.get_cached_watchlist_symbols()
                 if symbols:

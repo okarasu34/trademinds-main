@@ -335,6 +335,32 @@ class TradingBot:
         try:
             async with AsyncSessionLocal() as db:
                 open_trades = await self._get_open_positions(db)
+
+                # Paper mode: calculate PnL from live prices
+                if self.config.trade_mode != TradeMode.LIVE:
+                    for trade in open_trades:
+                        try:
+                            adapter = self.adapters.get(
+                                trade.market_type.value if hasattr(trade.market_type, "value") else str(trade.market_type)
+                            ) or next(iter(self.adapters.values()), None)
+                            if not adapter:
+                                continue
+                            tick = await adapter.get_tick(trade.symbol)
+                            current_price = tick.bid if trade.side.value == "buy" else tick.ask
+                            price_diff = current_price - trade.entry_price
+                            if trade.side.value == "sell":
+                                price_diff = -price_diff
+                            # Simple PnL estimate: price_diff * lot_size * multiplier
+                            market_type = trade.market_type.value if hasattr(trade.market_type, "value") else str(trade.market_type)
+                            multipliers = {"forex": 100000, "crypto": 1, "commodity": 100, "stock": 1, "index": 1}
+                            mult = multipliers.get(market_type, 1)
+                            trade.pnl = round(price_diff * trade.lot_size * mult, 2)
+                            await db.commit()
+                        except Exception as e:
+                            logger.warning(f"Paper PnL update error {trade.symbol}: {e}")
+                    return
+
+                # Live mode: sync with broker
                 for trade in open_trades:
                     adapter = self.adapters.get(
                         trade.market_type.value if hasattr(trade.market_type, "value") else str(trade.market_type)
